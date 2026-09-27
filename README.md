@@ -33,8 +33,8 @@
 ### 2. 安装
 
 ```bash
-git clone <你的仓库地址>
-cd 视频蒸馏器
+git clone https://github.com/blue1023/video-distiller.git
+cd video-distiller
 
 python -m venv .venv
 # Windows
@@ -184,6 +184,7 @@ pip install faster-whisper
 │   ├── selftest_e2e.py        # 端到端：假模型跑完整流水线（无需 API Key）
 │   ├── fetch_vendor.py        # 重新拉取前端依赖到 web/vendor
 │   ├── make_sample_artifact.py# 生成样例产物，检查排版
+│   ├── gh_push.py / gh_check.py # GitHub 推送与仓库一致性校验
 │   └── probe_bili_*.py        # B 站接口可用性排查
 └── data/                      # 运行产物（已 gitignore）
     ├── app.db
@@ -306,6 +307,9 @@ B 站的字幕接口（`x/player/wbi/v2`）**需要登录态**，匿名请求只
 - 不要高频请求、批量抓取，请保持默认的请求间隔；
 - 生成的笔记仅供个人复习使用，**请勿二次传播原视频内容**；
 - 视频版权归原作者所有，请在笔记中保留原视频链接与 UP 主署名（本项目已自动写入）。
+
+**不要把 `.env` 提交到仓库**（`.gitignore` 已排除）。你的 API Key 与 B 站 Cookie
+都存在本地：`.env` 或 `data/settings.json`，两者都不会被 git 跟踪。
 
 ---
 

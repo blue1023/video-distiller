@@ -29,6 +29,8 @@ python tools/selftest_e2e.py
 | `probe_bili_api.py` | 探测各 B 站接口在匿名下的返回码与字段 | 网络 |
 | `probe_bili_subtitle.py` | 深入对比 `player/v2` 与 `player/wbi/v2` 的字幕返回 | 网络 |
 | `probe_video_page.py` | 检查视频页 HTML 里是否内嵌字幕信息 | 网络 |
+| `gh_push.py` | 校验 GitHub Token、创建仓库、推送代码（token 走 `GH_TOKEN` 环境变量） | 网络 |
+| `gh_check.py` | 对比本地已提交文件与远端仓库是否一致 | 网络 |
 
 ## 关于 `selftest_e2e.py`
 
