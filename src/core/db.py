@@ -38,13 +38,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     transcript_src TEXT,
     transcript_chars INTEGER DEFAULT 0,
     note_style    TEXT DEFAULT 'detailed',
+    batch_id      TEXT,
+    refresh       INTEGER DEFAULT 0,
+    from_cache    INTEGER DEFAULT 0,
     created_at    REAL NOT NULL,
     updated_at    REAL NOT NULL,
     finished_at   REAL
 );
-
-CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tasks_status  ON tasks(status);
 
 CREATE TABLE IF NOT EXISTS notes (
     id          TEXT PRIMARY KEY,
@@ -58,8 +58,23 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at  REAL NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_notes_task ON notes(task_id);
+CREATE TABLE IF NOT EXISTS batches (
+    id         TEXT PRIMARY KEY,
+    note_style TEXT DEFAULT 'detailed',
+    total      INTEGER DEFAULT 0,
+    raw        TEXT,
+    created_at REAL NOT NULL
+);"""
+
+# 索引单独一份：必须等 _migrate() 补完列之后再建，否则老库升级会报
+# "no such column"（这个坑真的踩过，有回归测试兜着）。
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_status  ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_batch   ON tasks(batch_id);
+CREATE INDEX IF NOT EXISTS idx_notes_task    ON notes(task_id);
 CREATE INDEX IF NOT EXISTS idx_notes_created ON notes(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_batches_created ON batches(created_at DESC);
 """
 
 
@@ -86,6 +101,8 @@ def init_db() -> None:
     with db() as conn:
         conn.executescript(SCHEMA)
         _migrate(conn)
+        # 索引必须在补列之后建
+        conn.executescript(INDEXES)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -93,6 +110,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
     additions = {
         "note_style": "TEXT DEFAULT 'detailed'",
+        "batch_id": "TEXT",
+        "refresh": "INTEGER DEFAULT 0",
+        "from_cache": "INTEGER DEFAULT 0",
     }
     for column, definition in additions.items():
         if column not in existing:
@@ -116,14 +136,17 @@ def create_task(
     video_id: Optional[str] = None,
     part: int = 1,
     note_style: str = "detailed",
+    batch_id: Optional[str] = None,
+    refresh: bool = False,
 ) -> Dict[str, Any]:
     task_id = new_id("t_")
     now = time.time()
     with db() as conn:
         conn.execute(
             """INSERT INTO tasks (id, url, platform, video_id, part, status, stage,
-                                  progress, message, note_style, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                  progress, message, note_style, batch_id, refresh,
+                                  created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task_id,
                 url,
@@ -135,6 +158,8 @@ def create_task(
                 0.0,
                 f"已加入队列（风格：{note_style}）",
                 note_style,
+                batch_id,
+                1 if refresh else 0,
                 now,
                 now,
             ),
@@ -255,6 +280,55 @@ def list_notes(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
 def delete_note(note_id: str) -> None:
     with db() as conn:
         conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
+
+
+# ---------------------------------------------------------------- 批次
+
+
+def create_batch(
+    urls: List[str], note_style: str = "detailed", raw: Optional[str] = None
+) -> Dict[str, Any]:
+    batch_id = new_id("b_")
+    now = time.time()
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO batches (id, note_style, total, raw, created_at)
+               VALUES (?,?,?,?,?)""",
+            (batch_id, note_style, len(urls), raw or "\n".join(urls), now),
+        )
+    return get_batch(batch_id)  # type: ignore[return-value]
+
+
+def get_batch(batch_id: str) -> Optional[Dict[str, Any]]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM batches WHERE id=?", (batch_id,)).fetchone()
+        if not row:
+            return None
+        # 注意：所有查询都必须在 with 块内完成，出了块连接就关了
+        tasks = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM tasks WHERE batch_id=? ORDER BY created_at ASC", (batch_id,)
+            ).fetchall()
+        ]
+    batch = dict(row)
+    batch["tasks"] = tasks
+    batch["done"] = sum(1 for t in tasks if t["status"] == "success")
+    batch["failed"] = sum(1 for t in tasks if t["status"] == "failed")
+    return batch
+
+
+def list_batches(limit: int = 30) -> List[Dict[str, Any]]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM batches ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_batch(batch_id: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM batches WHERE id=?", (batch_id,))
 
 
 # ---------------------------------------------------------------- 事件总线

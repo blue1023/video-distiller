@@ -8,28 +8,37 @@
 # 1. 离线自检（秒级，不需要网络、不需要 API Key）
 python tools/selftest_offline.py
 
-# 2. 联网自检（验证 B 站接口 / 字幕 / 音频下载是否可用）
-python tools/selftest_network.py
-python tools/selftest_network.py https://www.bilibili.com/video/BVxxxx   # 指定视频
+# 2. 前端一致性检查（DOM id、资源引用、设置字段）
+python tools/check_frontend.py
 
-# 3. 端到端自检（会起一个"假的大模型服务"，不需要真实 API Key）
+# 3. 联网自检（验证 B 站接口 / 字幕 / 音频下载是否可用）
+python tools/selftest_network.py
+
+# 4. 端到端自检（会起一个"假的大模型服务"，不需要真实 API Key）
 python tools/selftest_e2e.py
+
+# 5. 真实 HTTP 冒烟（需要先 python run.py 起服务）
+python tools/smoke_http.py
 ```
 
 ## 脚本清单
 
 | 脚本 | 作用 | 依赖 |
 | --- | --- | --- |
-| `selftest_offline.py` | 配置加载、SQLite 读写与迁移、Markdown→导图解析、XMind/OPML 生成、字幕切块、笔记模板渲染、B 站链接解析 | 仅标准库（httpx 缺失时自动跳过 B 站解析项） |
+| `selftest_offline.py` | 配置、SQLite 读写与**老库迁移**、Markdown→导图解析、XMind/OPML 生成、字幕切块、笔记模板渲染、B 站链接解析、转写缓存、批量链接解析、本地平台、并发闸门 | 仅标准库（缺 httpx 时自动跳过 B 站解析项） |
+| `check_frontend.py` | index.html 的 id 唯一性 / JS 引用的 id 是否存在 / 静态资源与 vendor 是否齐全 | 无 |
 | `selftest_network.py` | 真实请求 B 站：链接解析 → 视频信息 → 分P → 字幕接口 → 音频流下载 | 网络 + httpx |
-| `selftest_e2e.py` | 起假模型服务 + FastAPI TestClient，跑完建任务→转写→生成→导出→清理全流程 | 网络（抓真实视频）+ 全部依赖 |
+| `selftest_e2e.py` | 起假模型服务 + TestClient，跑完建任务→转写→**缓存复用**→生成→导出→**批量**→**本地上传**→**重生成**→清理 | 网络（抓真实视频）+ 全部依赖 |
+| `smoke_http.py` | 对着**真实运行中**的服务打全套接口（含批量、上传、中文文件名下载） | 运行中的服务 |
 | `fetch_vendor.py` | 把 markmap / d3 / marked 下载到 `web/vendor/`（离线可用） | 网络 |
 | `make_sample_artifact.py` | 用假数据生成一份 md/xmind/opml 样例，人工检查排版 | 无 |
 | `find_subtitle_video.py` | 搜索并检测哪些视频带字幕（排查"拿不到字幕"用） | 网络 |
 | `probe_bili_api.py` | 探测各 B 站接口在匿名下的返回码与字段 | 网络 |
 | `probe_bili_subtitle.py` | 深入对比 `player/v2` 与 `player/wbi/v2` 的字幕返回 | 网络 |
 | `probe_video_page.py` | 检查视频页 HTML 里是否内嵌字幕信息 | 网络 |
-| `gh_push.py` | 校验 GitHub Token、创建仓库、推送代码（token 走 `GH_TOKEN` 环境变量） | 网络 |
+| `list_routes.py` | 打印应用注册的所有路由（排查路由冲突） | 无 |
+| `gh_push.py` | 校验 GitHub Token、创建仓库、推送代码（token 走 `GH_TOKEN`） | 网络 |
+| `gh_push_api.py` | 上面失败时的兜底：直接调 GitHub REST API 推对象（本机 git TLS 不可用时用） | 网络 |
 | `gh_check.py` | 对比本地已提交文件与远端仓库是否一致 | 网络 |
 
 ## 关于 `selftest_e2e.py`
@@ -55,7 +64,7 @@ python tools/selftest_e2e.py
 所有测试产物都写到 `.tmp/`（已 gitignore），不污染 `data/`：
 
 ```
-.tmp/selftest/   离线自检的临时文件
+.tmp/selftest/   离线自检的临时文件（含老库迁移用例）
 .tmp/e2e/        端到端自检的数据库
 .tmp/sample/     样例产物
 ```

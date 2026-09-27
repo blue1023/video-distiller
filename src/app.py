@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from .core.config import DATA_DIR, WEB_DIR, ensure_dirs, get_settings
 from .core.db import init_db, mark_pending_as_failed
 from .core.utils import get_logger, setup_logging
-from .webapi import routes_notes, routes_system, routes_tasks
+from .webapi import routes_notes, routes_system, routes_tasks, routes_upload
 
 setup_logging()
 log = get_logger("app")
@@ -39,10 +39,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if stale:
         log.info("已清理 %d 个残留临时音频", stale)
     settings = get_settings()
+    from .pipeline import configure_concurrency
+
+    limit = configure_concurrency()
     log.info(
-        "启动完成 | 模型=%s | 语音转写=%s | 数据目录=%s",
+        "启动完成 | 模型=%s | 语音转写=%s | 并发上限=%d | 数据目录=%s",
         settings.llm_model or "未配置",
         settings.asr_provider,
+        limit,
         DATA_DIR,
     )
     yield
@@ -72,6 +76,7 @@ app.add_middleware(
 
 app.include_router(routes_tasks.router)
 app.include_router(routes_notes.router)
+app.include_router(routes_upload.router)
 app.include_router(routes_system.router)
 
 

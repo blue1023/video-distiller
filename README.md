@@ -11,13 +11,18 @@
 | 能力 | 说明 |
 | --- | --- |
 | 🔗 链接输入 | 支持完整链接、BV 号、av 号、b23.tv 短链、带 `?p=3&t=120` 的分 P / 时间戳链接 |
+| 📚 批量提交 | 一次粘贴多条链接（最多 50 条），自动去重，按并发上限依次执行 |
+| 📁 本地文件 | 上传本地视频/音频（走同一套转写→蒸馏→导图流程），URL 形如 `local://文件名` |
 | 📝 字幕抓取 | 优先人工 CC 字幕 → B 站 AI 字幕 → 无字幕时自动下载音频并语音转写 |
+| ⚡ 转写缓存 | 同一视频重复生成时跳过下载与转写；换 ASR 模型或"忽略缓存"时会自动重抓 |
+| 🎛 并发控制 | 同时运行的任务数可调（1-8），避免批量时撞 B 站风控 |
 | 🤖 大模型蒸馏 | 任意 **OpenAI 兼容**接口（DeepSeek / 通义 / Kimi / 硅基流动 / OpenAI / 本地 Ollama） |
 | 📄 Markdown 产物 | 摘要、关键词、带时间戳跳转的目录、分章节详细笔记、核心结论、金句、行动清单 |
 | 🧠 思维导图 | 网页内可缩放/拖拽/折叠，一键导出 **图片(PNG)**、**矢量(SVG)**、**XMind**、**OPML** |
 | ⏱ 实时进度 | SSE 推送每个阶段（解析 → 字幕 → AI 整理 → 落盘），长视频不用干等 |
-| 💾 本地归档 | 笔记落盘 `data/notes/`，SQLite 建索引，网页里可回看、重下、删除 |
+| 💾 本地归档 | 笔记落盘 `data/notes/`，SQLite 建索引，网页里可回看、重下、删除、重生成 |
 | 🧩 预留扩展 | 平台适配器 + 转写适配器 + LLM 适配器三层解耦，加 YouTube/抖音只需新增一个类 |
+| 🐳 一键部署 | Dockerfile + docker-compose + GitHub Actions CI |
 | 🌙 深色模式 | 跟随系统，离线可用（前端依赖已本地化，无网也能跑） |
 
 ---
@@ -92,7 +97,7 @@ python run.py --reload           # 开发模式，改代码自动重启
 1. **粘贴链接** → 选风格（精简 / 详尽 / 学术）→ 点「生成笔记」。
 2. 左栏出现任务卡片，进度条会实时走；短字幕视频约 20-40 秒，1 小时长视频约 1-3 分钟。
 3. 完成后右栏显示**思维导图**，切到 **Markdown** 页签看全文。
-4. 右上按钮：`🖼 导出图片`（PNG，2 倍图）、`SVG`、`🧠 XMind`、`⬇️ 下载 MD`。
+4. 右上按钮：`🖼 导出图片`（PNG，2 倍图）、`SVG`、`🧠 XMind`、`⬇️ 下载 MD`、`🗑 删除`。
 5. 生成的产物同时落盘在：
 
 ```
@@ -101,6 +106,46 @@ data/notes/20250101-120000_视频标题.mindmap.json  # 导图树结构
 data/notes/20250101-120000_视频标题.xmind         # 可编辑的 XMind 文件
 data/notes/20250101-120000_视频标题.opml          # 通用大纲格式
 ```
+
+### 批量生成
+
+点输入框上方的 **「批量」** 页签，一行一个链接粘进去，最多 50 条（自动去重）。
+任务按「同时运行的任务数」依次执行，可在设置里调整；单条失败不影响其它条。
+
+### 本地视频 / 音频
+
+点 **「📁 上传本地视频/音频」**，选文件后会自动填入输入框（多文件会切到批量模式）。
+支持 mp4/mkv/mov/flv/webm 与 mp3/m4a/wav/flac 等常见格式。
+
+> ⚠️ 本地文件**必须开启语音转写**才能出笔记（没有现成字幕）：
+> 设置里把「语音转写」切到 `faster-whisper`（本地离线）或 `openai`，
+> 本地模式需要先 `pip install faster-whisper`，首次运行会自动下载模型。
+
+### 缓存与并发
+
+- **转写缓存**（默认开）：同一视频第二次生成会直接复用文本，跳过下载与转写。
+  换 ASR 模型会自动重新抓取；想强制重抓，勾选「忽略缓存重抓」或用任务卡片上的「重生成」。
+  缓存文件在 `data/cache/transcripts/`，可在设置面板里一键清空。
+- **同时运行的任务数**（默认 2，范围 1-8）：批量提交时按此排队。并发越高越容易触发 B 站风控。
+
+---
+
+## 🐳 Docker 部署（可选）
+
+```bash
+# 构建 + 启动，笔记数据持久化到 ./data
+docker compose up -d
+
+# 或者手动
+docker build -t video-distiller .
+docker run -d --name distiller -p 8848:8848 \
+  -e LLM_API_KEY=sk-xxx \
+  -v "%cd%/data:/app/data" \
+  video-distiller
+```
+
+镜像内置 ffmpeg（语音转写需要），不含 faster-whisper —— 想在容器里本地转写，
+可以 `docker exec -it distiller pip install faster-whisper` 或自行扩展 Dockerfile。
 
 ---
 
@@ -147,6 +192,9 @@ pip install faster-whisper
 | --- | --- | --- |
 | `HOST` / `PORT` | `127.0.0.1` / `8848` | 监听地址与端口 |
 | `NOTE_STYLE` | `detailed` | 默认笔记风格：`concise` / `detailed` / `academic` |
+| `CACHE_ENABLED` | `true` | 是否启用转写缓存 |
+| `CACHE_DIR` | `data/cache` | 缓存目录（可放临时盘） |
+| `MAX_CONCURRENCY` | `2` | 同时运行的任务数（1-8）|
 
 ---
 
@@ -157,38 +205,37 @@ pip install faster-whisper
 ├── run.py                     # 启动入口（python run.py）
 ├── requirements.txt
 ├── .env.example               # 配置模板
+├── Dockerfile / docker-compose.yml
+├── .github/workflows/ci.yml   # CI：编译检查 + 离线自检
 ├── src/
 │   ├── app.py                 # FastAPI 应用（含静态资源挂载）
-│   ├── pipeline.py            # 核心流水线：链接→字幕→LLM→落盘
+│   ├── pipeline.py            # 核心流水线：链接→缓存/字幕→LLM→落盘（含并发闸门）
 │   ├── asr.py                 # 语音转写适配器（openai / faster-whisper）
 │   ├── core/
 │   │   ├── config.py          # 配置加载（env > settings.json > 默认）
-│   │   ├── db.py              # SQLite 持久层 + SSE 事件总线
+│   │   ├── db.py              # SQLite 持久层（任务/笔记/批次）+ SSE 事件总线
+│   │   ├── cache.py           # 转写缓存（按平台+视频+分P+ASR 配置做 key）
 │   │   └── utils.py           # 文件名清洗、Markdown 解析、XMind/OPML 生成
 │   ├── platforms/
 │   │   ├── base.py            # 平台抽象接口（扩展点 ①）
 │   │   ├── bilibili.py        # B 站实现（WBI 签名 / 字幕 / 音频）
-│   │   └── registry.py        # 平台注册表
+│   │   ├── local_file.py      # 本地上传实现（扩展点 ②已落地）
+│   │   └── registry.py        # 平台注册表（自动识别链接属于哪个平台）
 │   ├── llm/
 │   │   ├── client.py          # OpenAI 兼容客户端（重试 / JSON 抽取）
 │   │   └── notes.py           # 两阶段 Prompt 工程 + Markdown 模板
-│   └── webapi/                # REST + SSE 路由
+│   └── webapi/                # REST + SSE 路由（tasks / notes / upload / system）
 ├── web/                       # 前端（原生 JS，无需构建）
 │   ├── index.html
 │   ├── css/app.css
 │   ├── js/{app,api,markdown,mindmap,fallback}.js
 │   └── vendor/                # d3 / markmap / marked（离线可用）
 ├── tools/                     # 自检与调试脚本（见 tools/README.md）
-│   ├── selftest_offline.py    # 离线自检：纯函数 / 数据库 / 模板渲染
-│   ├── selftest_network.py    # 联网自检：B 站接口 / 字幕 / 音频
-│   ├── selftest_e2e.py        # 端到端：假模型跑完整流水线（无需 API Key）
-│   ├── fetch_vendor.py        # 重新拉取前端依赖到 web/vendor
-│   ├── make_sample_artifact.py# 生成样例产物，检查排版
-│   ├── gh_push.py / gh_check.py # GitHub 推送与仓库一致性校验
-│   └── probe_bili_*.py        # B 站接口可用性排查
 └── data/                      # 运行产物（已 gitignore）
     ├── app.db
     ├── settings.json
+    ├── cache/                 # 转写缓存
+    ├── uploads/               # 本地视频上传
     └── notes/
 ```
 
@@ -222,9 +269,13 @@ class YouTubePlatform(BasePlatform):
 然后在 `src/platforms/registry.py` 的 `_load_builtin()` 里 `register(YouTubePlatform)`。
 流水线与前端**不需要任何改动**，平台列表会自动出现在 `/api/platforms`。
 
-### ② 接入本地视频上传
+参考实现：`src/platforms/local_file.py`（本地文件，只有 170 行）就是按这个接口写的。
 
-`BasePlatform` 的接口天然支持：新增一个 `LocalFilePlatform`，`match()` 判断 URL 是否是 `file://` 或自定义 scheme，`fetch_transcript()` 直接调用 `src/asr.py` 的 `transcribe_audio()`。前端的上传入口只需加一个 `<input type="file">` 并调用现有的 `/api/tasks`。
+### ② 本地视频上传（已实现）
+
+`src/platforms/local_file.py` 把上传到 `data/uploads/` 的文件当成单 P 视频，
+`fetch_transcript()` 直接调用 `src/asr.py` 的 `transcribe_audio()`。
+前端入口是 `/api/upload`，任务 URL 用 `local://<文件名>`。
 
 ### ③ 换 ASR 后端
 
@@ -242,14 +293,22 @@ class YouTubePlatform(BasePlatform):
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/tasks` | 创建任务 `{url, note_style}` |
+| `POST` | `/api/tasks` | 创建任务 `{url, note_style, refresh}` |
+| `POST` | `/api/tasks/batch` | 批量创建 `{text\|urls, note_style, refresh}` |
 | `GET` | `/api/tasks` | 任务列表 |
 | `GET` | `/api/tasks/{id}` | 任务详情 |
 | `GET` | `/api/tasks/{id}/events` | **SSE** 实时进度流 |
 | `POST` | `/api/tasks/{id}/cancel` | 取消任务 |
+| `POST` | `/api/tasks/{id}/refresh` | 重新生成（`?use_cache=true` 可复用缓存）|
+| `GET` | `/api/tasks/batches/{id}` | 批次详情 |
+| `POST` | `/api/upload` | 上传本地视频/音频（multipart，字段名 `files`）|
+| `GET` | `/api/upload` | 已上传文件列表 |
+| `DELETE` | `/api/upload/{filename}` | 删除上传文件 |
 | `GET` | `/api/notes` | 笔记列表 |
 | `GET` | `/api/notes/{id}` | 笔记详情（含 Markdown 正文与导图树） |
 | `GET` | `/api/notes/{id}/download?kind=md\|json\|xmind\|opml` | 下载产物 |
+| `GET` | `/api/cache` / `DELETE` | 转写缓存统计 / 清空 |
+| `GET` | `/api/queue` | 并发队列状态 |
 | `PATCH` | `/api/settings` | 更新设置 |
 | `POST` | `/api/settings/test-llm` | 大模型连通性自检 |
 | `POST` | `/api/settings/test-bilibili` | B 站接口连通性自检 |
@@ -257,10 +316,18 @@ class YouTubePlatform(BasePlatform):
 命令行用法示例：
 
 ```bash
-# 提交任务
+# 提交单条任务
 curl -X POST http://127.0.0.1:8848/api/tasks \
   -H "Content-Type: application/json" \
   -d '{"url":"https://www.bilibili.com/video/BV1GJ411x7h7"}'
+
+# 批量提交
+curl -X POST http://127.0.0.1:8848/api/tasks/batch \
+  -H "Content-Type: application/json" \
+  -d '{"text":"https://www.bilibili.com/video/BV1GJ411x7h7\nhttps://www.bilibili.com/video/BV1xx411c7mD"}'
+
+# 上传本地视频
+curl -X POST http://127.0.0.1:8848/api/upload -F "files=@D:/videos/lecture.mp4"
 
 # 下载 Markdown
 curl -OJ "http://127.0.0.1:8848/api/notes/n_xxxx/download?kind=md"
@@ -315,13 +382,15 @@ B 站的字幕接口（`x/player/wbi/v2`）**需要登录态**，匿名请求只
 
 ## 🗺 Roadmap
 
+- [x] 本地视频文件上传（走同一套转写链路）
+- [x] 批量链接排队与并发控制
+- [x] 转写缓存（同一视频不重复下载/转写）
+- [x] Docker 一键部署 + GitHub Actions CI
 - [ ] YouTube / 抖音平台适配器
-- [ ] 本地视频文件上传（走同一套转写链路）
-- [ ] 批量链接排队与并发控制
 - [ ] 笔记全文检索（SQLite FTS5）
 - [ ] 导出 Word / PDF / Anki 卡片
 - [ ] 支持 B 站合集与 UP 主整页批量蒸馏
-- [ ] Docker 一键部署
+- [ ] 导图样式主题与布局偏好持久化
 
 ## 📄 License
 

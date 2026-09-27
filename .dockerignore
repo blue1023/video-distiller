@@ -1,0 +1,21 @@
+# 构建镜像时排除的东西（减小体积 + 避免把密钥和产物打进镜像）
+.git
+.gitignore
+.gitattributes
+.venv
+venv
+env
+.tmp
+data
+docs
+tools
+__pycache__
+**/__pycache__
+*.pyc
+*.log
+.env
+.env.*
+!.env.example
+.idea
+.vscode
+node_modules

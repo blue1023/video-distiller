@@ -13,11 +13,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .core.config import NOTES_DIR, get_settings
+from .core import cache
 from .core.db import create_note, delete_task, emit, get_task, update_task
 from .core.utils import get_logger, safe_filename, to_json, tree_to_xmind
 from .llm.notes import generate_note
 from .platforms import resolve
 from .platforms.base import PlatformError, Transcript, VideoInfo, VideoPart
+from .platforms.local_file import LocalFilePlatform
 
 log = get_logger("pipeline")
 
@@ -27,6 +29,7 @@ PROGRESS = {
     "parsing": 0.05,
     "info": 0.15,
     "subtitle": 0.35,
+    "cache": 0.45,
     "asr": 0.50,
     "structuring": 0.60,
     "rendering": 0.85,
@@ -36,6 +39,35 @@ PROGRESS = {
 }
 
 _running: Dict[str, asyncio.Task] = {}
+
+#: 全局并发闸门（同时跑几个任务）。见 configure_concurrency()。
+_semaphore: Optional[asyncio.Semaphore] = None
+_semaphore_limit: int = 0
+_waiting: int = 0
+
+
+def configure_concurrency(limit: Optional[int] = None) -> int:
+    """按配置重建并发闸门；返回当前上限。"""
+    global _semaphore, _semaphore_limit
+    settings = get_settings()
+    target = int(limit if limit is not None else (settings.max_concurrency or 1))
+    target = max(1, min(8, target))
+    if _semaphore is None or target != _semaphore_limit:
+        _semaphore = asyncio.Semaphore(target)
+        _semaphore_limit = target
+        log.info("任务并发上限设为 %d", target)
+    return target
+
+
+def _gate() -> asyncio.Semaphore:
+    if _semaphore is None:
+        configure_concurrency()
+    assert _semaphore is not None
+    return _semaphore
+
+
+def queue_status() -> Dict[str, int]:
+    return {"running": len(_running), "waiting": _waiting, "limit": _semaphore_limit or 0}
 
 
 @dataclass
@@ -71,8 +103,30 @@ def cancel_task(task_id: str) -> bool:
 
 
 async def _run_guarded(task_id: str) -> None:
+    global _waiting
     try:
-        await run_pipeline(task_id)
+        # 并发闸门：排队期间任务状态保持 pending
+        gate = _gate()
+        if gate.locked():
+            _waiting += 1
+            await asyncio.to_thread(
+                update_task,
+                task_id,
+                message=f"排队中（当前并发上限 {_semaphore_limit}）…",
+            )
+            await emit(
+                task_id,
+                "queued",
+                PROGRESS["queued"],
+                f"排队中，等待空闲额度（上限 {_semaphore_limit}）…",
+                status="pending",
+            )
+        try:
+            async with gate:
+                await run_pipeline(task_id)
+        finally:
+            if gate.locked():
+                _waiting = max(0, _waiting - 1)
     except asyncio.CancelledError:  # pragma: no cover - 用户取消
         await asyncio.to_thread(
             update_task, task_id, status="cancelled", stage="cancelled", message="已取消"
@@ -148,18 +202,44 @@ async def run_pipeline(task_id: str) -> Artifacts:
         message=f"已获取：{info.title}",
     )
     can_asr = (settings.asr_provider or "none").lower() not in ("none", "", "off", "disabled")
+    refresh = bool(task.get("refresh"))
+    cache_extra = _cache_extra(settings, info, part)
 
-    # 3. 字幕 / 转写
-    stage_message = (
-        "正在获取字幕…" if not can_asr else "正在获取字幕（无字幕将自动转写音频）…"
-    )
-    await emit(task_id, "subtitle", PROGRESS["subtitle"], stage_message)
+    # 3. 字幕 / 转写（先查缓存）
+    transcript: Optional[Transcript] = None
+    if not refresh:
+        cached = cache.load(info.platform, info.video_id, part.index, extra=cache_extra)
+        if cached is not None:
+            transcript = cached
+            await asyncio.to_thread(update_task, task_id, from_cache=1)
+            await emit(
+                task_id,
+                "cache",
+                PROGRESS["cache"],
+                f"命中转写缓存，跳过抓取（{len(cached.text)} 字）",
+                from_cache=True,
+            )
 
-    transcript: Transcript = await platform.fetch_transcript(
-        parsed, info, part, allow_asr=can_asr
-    )
-    if transcript.is_empty:
-        raise PlatformError("字幕内容为空，无法生成笔记")
+    if transcript is None:
+        stage_message = (
+            "正在获取字幕…" if not can_asr else "正在获取字幕（无字幕将自动转写音频）…"
+        )
+        await emit(task_id, "subtitle", PROGRESS["subtitle"], stage_message)
+
+        transcript = await platform.fetch_transcript(
+            parsed, info, part, allow_asr=can_asr
+        )
+        if transcript.is_empty:
+            raise PlatformError("字幕内容为空，无法生成笔记")
+        # 只有真正抓到的结果才写缓存
+        cache.store(
+            info.platform,
+            info.video_id,
+            part.index,
+            transcript,
+            extra=cache_extra,
+            meta={"title": info.title, "uploader": info.uploader},
+        )
 
     is_asr = transcript.source.startswith("asr")
     await asyncio.to_thread(
@@ -168,14 +248,15 @@ async def run_pipeline(task_id: str) -> Artifacts:
         transcript_src=transcript.source,
         transcript_chars=len(transcript.text),
     )
-    await emit(
-        task_id,
-        "asr" if is_asr else "subtitle",
-        PROGRESS["asr"] if is_asr else PROGRESS["subtitle"] + 0.05,
-        f"已获得文本 {len(transcript.text)} 字（{_source_label(transcript.source)}）",
-        transcript_source=transcript.source,
-        transcript_chars=len(transcript.text),
-    )
+    if transcript.source != "cache":
+        await emit(
+            task_id,
+            "asr" if is_asr else "subtitle",
+            PROGRESS["asr"] if is_asr else PROGRESS["subtitle"] + 0.05,
+            f"已获得文本 {len(transcript.text)} 字（{_source_label(transcript.source)}）",
+            transcript_source=transcript.source,
+            transcript_chars=len(transcript.text),
+        )
 
     # 4. 大模型结构化
     await emit(
@@ -232,7 +313,30 @@ def _source_label(source: str) -> str:
         "asr_openai": "云端语音转写",
         "asr_faster-whisper": "本地语音转写",
         "asr_local": "本地语音转写",
+        "cache": "转写缓存",
     }.get(source, source)
+
+
+def _cache_extra(settings, info: VideoInfo, part: VideoPart) -> str:
+    """缓存指纹的附加部分。
+
+    - ASR 配置变了（换模型/换后端）应当重新转写，所以把配置写进指纹；
+    - 本地文件用 mtime 保证"换了文件"时缓存自动失效。
+    """
+    if info.platform == LocalFilePlatform.name:
+        path = Path(str((info.extra or {}).get("path") or ""))
+        try:
+            stat = path.stat()
+            return f"local:{int(stat.st_mtime)}:{stat.st_size}"
+        except OSError:
+            return "local:missing"
+    provider = (settings.asr_provider or "none").strip().lower()
+    model = (
+        settings.asr_local_model
+        if provider in ("faster-whisper", "faster_whisper", "local")
+        else settings.asr_model
+    )
+    return f"asr={provider}:{model}"
 
 
 def save_artifacts(

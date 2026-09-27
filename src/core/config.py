@@ -22,13 +22,15 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = BASE_DIR / "data"
 NOTES_DIR = DATA_DIR / "notes"
 MEDIA_DIR = DATA_DIR / "media"
+UPLOAD_DIR = DATA_DIR / "uploads"
+CACHE_DIR = DATA_DIR / "cache"
 DB_PATH = DATA_DIR / "app.db"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 WEB_DIR = BASE_DIR / "web"
 
 
 def ensure_dirs() -> None:
-    for d in (DATA_DIR, NOTES_DIR, MEDIA_DIR):
+    for d in (DATA_DIR, NOTES_DIR, MEDIA_DIR, UPLOAD_DIR, CACHE_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -67,6 +69,11 @@ class Settings(BaseModel):
     port: int = 8848
     note_style: str = "detailed"  # concise | detailed | academic
 
+    # 缓存与并发
+    cache_enabled: bool = True
+    cache_dir: str = ""  # 留空用 data/cache
+    max_concurrency: int = 2  # 同时跑几个任务（批量和并发都在此限制内）
+
     # 是否把 LLM 请求体/响应写日志（排错用）
     debug_llm: bool = False
 
@@ -99,6 +106,9 @@ _ENV_MAP: Dict[str, str] = {
     "HOST": "host",
     "PORT": "port",
     "NOTE_STYLE": "note_style",
+    "CACHE_ENABLED": "cache_enabled",
+    "CACHE_DIR": "cache_dir",
+    "MAX_CONCURRENCY": "max_concurrency",
     "DEBUG_LLM": "debug_llm",
 }
 

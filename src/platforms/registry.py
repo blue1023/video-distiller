@@ -30,8 +30,10 @@ def _load_builtin() -> None:
     if _FACTORIES:
         return
     from .bilibili import BilibiliPlatform
+    from .local_file import LocalFilePlatform
 
     register(BilibiliPlatform)
+    register(LocalFilePlatform)
 
 
 def available_platforms() -> List[Dict[str, str]]:
@@ -40,7 +42,7 @@ def available_platforms() -> List[Dict[str, str]]:
         {
             "name": name,
             "display_name": _FACTORIES[name].display_name,
-            "supports_local_upload": "false",
+            "supports_local_upload": str(name == "local").lower(),
             "supports_audio": str(_FACTORIES[name].supports_audio).lower(),
         }
         for name in _ORDER
@@ -71,7 +73,10 @@ def resolve(url: str, settings: Optional[Settings] = None) -> BasePlatform:
         except Exception as exc:  # pragma: no cover - 匹配逻辑不应抛错
             errors.append(f"{name}: {exc}")
     detail = f"（{'; '.join(errors)}）" if errors else ""
-    raise PlatformError(f"没有平台能处理这个链接，目前仅支持 B 站视频{detail}")
+    raise PlatformError(
+        f"没有平台能处理这个链接{detail}。"
+        "目前支持：B 站视频链接、以及上传后的本地文件（local://文件名）。"
+    )
 
 
 def reset_instances() -> None:

@@ -283,6 +283,162 @@ def test_bilibili_parse() -> None:
     check("match 排除非 B 站", not platform.match("https://www.youtube.com/watch?v=xxx"))
 
 
+def test_db_migration() -> None:
+    """回归测试：老版本数据库（没有 batch_id 等列）必须能平滑升级。
+
+    之前的真实 bug：索引脚本在补列之前执行，升级时报 "no such column: batch_id"。
+    """
+    print("\n== 数据库迁移（老库升级）==")
+    import sqlite3
+
+    import src.core.db as db_module
+
+    tmp = Path(tempdir())
+    db_path = tmp / "legacy.db"
+
+    # 造一个"旧版本"的表：只有最初的列
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY, url TEXT NOT NULL, platform TEXT NOT NULL DEFAULT 'bilibili',
+            video_id TEXT, part INTEGER DEFAULT 1, title TEXT, uploader TEXT,
+            duration INTEGER DEFAULT 0, cover TEXT, status TEXT NOT NULL DEFAULT 'pending',
+            stage TEXT, progress REAL NOT NULL DEFAULT 0, message TEXT, error TEXT,
+            transcript_src TEXT, transcript_chars INTEGER DEFAULT 0,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL, finished_at REAL
+        );
+        CREATE TABLE notes (
+            id TEXT PRIMARY KEY, task_id TEXT NOT NULL, title TEXT NOT NULL, md_path TEXT NOT NULL,
+            mindmap_json TEXT, summary TEXT, tags TEXT, word_count INTEGER DEFAULT 0,
+            created_at REAL NOT NULL
+        );
+        INSERT INTO tasks (id, url, status, progress, created_at, updated_at)
+        VALUES ('t_old', 'https://www.bilibili.com/video/BV1xx411c7mD', 'success', 1.0, 1.0, 1.0);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    original = db_module.DB_PATH
+    db_module.DB_PATH = db_path
+    try:
+        db_module.init_db()
+        with db_module.db() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+            indexes = {
+                row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+            }
+        for column in ("batch_id", "refresh", "from_cache", "note_style"):
+            check(f"补上了 {column} 列", column in columns, str(sorted(columns)))
+        check("建出了批次索引", "idx_tasks_batch" in indexes, str(sorted(indexes)))
+        check("老数据保留", db_module.get_task("t_old") is not None)
+        batch = db_module.create_batch(["BV1", "BV2"], note_style="concise")
+        check("老库也能建批次", bool(batch and batch["id"]))
+        check("批次任务归属可查", db_module.get_batch(batch["id"])["total"] == 2)
+    finally:
+        db_module.DB_PATH = original
+
+
+def test_cache() -> None:
+    print("\n== 转写缓存 ==")
+    from src.core import cache
+    from src.core.config import Settings
+    from src.platforms.base import Transcript
+
+    tmp = tempdir()
+    settings = Settings(cache_enabled=True, cache_dir=tmp)
+    transcript = Transcript(
+        text="[0:00] 缓存测试内容\n[0:05] 第二行",
+        source="subtitle_ai",
+        language="zh-CN",
+        segments=[{"from": 0.0, "to": 5.0, "text": "缓存测试内容"}],
+    )
+    check("未写入前不命中", cache.load("bilibili", "BVtest", 1, settings=settings) is None)
+    path = cache.store("bilibili", "BVtest", 1, transcript, extra="asr=none:", settings=settings)
+    check("写入缓存成功", path is not None and path.exists())
+
+    hit = cache.load("bilibili", "BVtest", 1, extra="asr=none:", settings=settings)
+    check("命中缓存", hit is not None and hit.text == transcript.text)
+    check("缓存保留来源", hit is not None and hit.source == "subtitle_ai")
+    check("缓存保留时间轴", hit is not None and len(hit.segments) == 1)
+    check(
+        "分P 不同则未命中",
+        cache.load("bilibili", "BVtest", 2, extra="asr=none:", settings=settings) is None,
+    )
+    check(
+        "ASR 配置变化则未命中",
+        cache.load("bilibili", "BVtest", 1, extra="asr=openai:whisper-1", settings=settings) is None,
+    )
+    check(
+        "关闭缓存后不命中",
+        cache.load(
+            "bilibili", "BVtest", 1, extra="asr=none:", settings=Settings(cache_enabled=False, cache_dir=tmp)
+        )
+        is None,
+    )
+
+    stats = cache.stats(settings)
+    check("缓存统计条数", stats["count"] == 1, str(stats))
+    check("缓存统计体积", stats["bytes"] > 0)
+    cleared = cache.clear(settings)
+    check("清空缓存", cleared["removed"] == 1 and cache.stats(settings)["count"] == 0, str(cleared))
+
+
+def test_batch_split() -> None:
+    print("\n== 批量链接解析 ==")
+    from src.webapi.routes_tasks import split_urls
+
+    text = """
+    https://www.bilibili.com/video/BV1GJ411x7h7
+    【必看】https://www.bilibili.com/video/BV1xx411c7mD?p=2
+    BV1GJ411x7h7
+    local://1700000000_我的本地视频.mp4
+
+    https://www.bilibili.com/video/BV1GJ411x7h7
+    """
+    urls = split_urls(text, None)
+    check("解析出 4 条（去重）", len(urls) == 4, str(urls))
+    check("保留顺序", urls[0].endswith("BV1GJ411x7h7"), urls[0])
+    check("带标题行取到链接", "BV1xx411c7mD" in urls[1], urls[1])
+    check("纯 BV 号保留", urls[2] == "BV1GJ411x7h7", urls[2])
+    check("本地链接保留", urls[3].startswith("local://"), urls[3])
+    check("空输入返回空", split_urls("", []) == [])
+    check(
+        "数组与文本合并去重",
+        len(split_urls("BV1", ["BV1", "BV2"])) == 2,
+        str(split_urls("BV1", ["BV1", "BV2"])),
+    )
+
+
+def test_local_platform() -> None:
+    print("\n== 本地视频平台 ==")
+    from src.platforms.local_file import LocalFilePlatform, is_local
+
+    platform = LocalFilePlatform.__new__(LocalFilePlatform)
+    check("识别 local://", is_local("local://a.mp4") and platform.match("local://a.mp4"))
+    check("不抢 B 站链接", not platform.match("https://www.bilibili.com/video/BV1GJ411x7h7"))
+    check("空链接不匹配", not platform.match(""))
+    check(
+        "不存在的本地文件报错",
+        _raises(platform.normalize, "local://不存在的文件.mp4"),
+    )
+    check("非法 scheme 报错", _raises(platform.normalize, "https://example.com/a.mp4"))
+
+
+def test_concurrency() -> None:
+    print("\n== 并发闸门 ==")
+    from src.pipeline import configure_concurrency, queue_status
+
+    limit = configure_concurrency(3)
+    check("按参数设置上限", limit == 3, str(limit))
+    check("越界值被夹住", configure_concurrency(99) == 8)
+    check("下限为 1", configure_concurrency(0) == 1)
+    status = queue_status()
+    check("队列状态字段", set(status) == {"running", "waiting", "limit"}, str(status))
+    configure_concurrency(2)
+
+
 def _raises(func, *args) -> bool:
     try:
         func(*args)
@@ -300,6 +456,11 @@ def main() -> int:
         test_render,
         test_mindmap_fallback,
         test_bilibili_parse,
+        test_db_migration,
+        test_cache,
+        test_batch_split,
+        test_local_platform,
+        test_concurrency,
     ):
         try:
             test()

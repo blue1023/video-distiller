@@ -51,11 +51,39 @@ async def patch_settings(payload: SettingsPatch) -> Dict[str, Any]:
     settings = save_settings(patch)
     # 平台实例持有旧配置（Cookie / UA / 间隔），需要重建
     platform_registry.reset_instances()
+    # 并发上限变化时重建闸门（已排队的任务继续按新上限调度）
+    if "max_concurrency" in patch:
+        from ..pipeline import configure_concurrency
+
+        configure_concurrency(settings.max_concurrency)
     return {
         "settings": settings.public(),
         "llm_ready": llm_ready(settings),
         "message": "设置已保存并生效",
     }
+
+
+@router.get("/cache")
+async def cache_stats() -> Dict[str, Any]:
+    """转写缓存统计。"""
+    from ..core import cache as cache_module
+
+    return cache_module.stats()
+
+
+@router.delete("/cache")
+async def cache_clear() -> Dict[str, Any]:
+    from ..core import cache as cache_module
+
+    result = cache_module.clear()
+    return {"ok": True, "message": f"已清理 {result['removed']} 条转写缓存", **result}
+
+
+@router.get("/queue")
+async def queue_info() -> Dict[str, Any]:
+    from ..pipeline import queue_status
+
+    return queue_status()
 
 
 @router.post("/settings/test-llm")

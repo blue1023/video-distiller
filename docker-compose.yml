@@ -1,0 +1,21 @@
+services:
+  distiller:
+    build: .
+    image: video-distiller:latest
+    container_name: video-distiller
+    ports:
+      - "8848:8848"
+    environment:
+      # 也可以直接在网页右上角「设置」里填，两者等价（环境变量优先级更高）
+      LLM_BASE_URL: "https://api.deepseek.com/v1"
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      LLM_MODEL: "deepseek-chat"
+      # 无字幕视频的兜底转写：none / openai / faster-whisper
+      ASR_PROVIDER: "${ASR_PROVIDER:-none}"
+      # 遇到 412 风控或要抓 AI 字幕时填浏览器 Cookie
+      BILI_COOKIE: "${BILI_COOKIE:-}"
+      MAX_CONCURRENCY: "2"
+    volumes:
+      # 笔记、数据库、缓存、上传文件都持久化在宿主机 ./data
+      - ./data:/app/data
+    restart: unless-stopped

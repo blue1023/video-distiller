@@ -32,16 +32,29 @@
 
   window.API = {
     health: function () { return request("/api/health"); },
+    queue: function () { return request("/api/queue"); },
+    platforms: function () { return request("/api/platforms"); },
 
-    createTask: function (url, noteStyle) {
+    createTask: function (url, noteStyle, refresh) {
       return request("/api/tasks", {
         method: "POST",
-        body: { url: url, note_style: noteStyle || null }
+        body: { url: url, note_style: noteStyle || null, refresh: !!refresh }
       });
     },
-    listTasks: function (limit) { return request("/api/tasks?limit=" + (limit || 50)); },
+    createBatch: function (text, noteStyle, refresh) {
+      return request("/api/tasks/batch", {
+        method: "POST",
+        body: { text: text, note_style: noteStyle || null, refresh: !!refresh }
+      });
+    },
+    listTasks: function (limit, offset) {
+      return request("/api/tasks?limit=" + (limit || 50) + "&offset=" + (offset || 0));
+    },
     getTask: function (id) { return request("/api/tasks/" + encodeURIComponent(id)); },
     cancelTask: function (id) { return request("/api/tasks/" + encodeURIComponent(id) + "/cancel", { method: "POST" }); },
+    refreshTask: function (id, useCache) {
+      return request("/api/tasks/" + encodeURIComponent(id) + "/refresh" + (useCache ? "?use_cache=true" : ""), { method: "POST" });
+    },
     deleteTask: function (id) { return request("/api/tasks/" + encodeURIComponent(id), { method: "DELETE" }); },
 
     listNotes: function (limit) { return request("/api/notes?limit=" + (limit || 100)); },
@@ -53,9 +66,38 @@
       return "/api/notes/" + encodeURIComponent(id) + "/download?kind=" + (kind || "md");
     },
 
+    uploadFiles: function (fileList, onProgress) {
+      // 用 XHR 以便拿到上传进度
+      return new Promise(function (resolve, reject) {
+        var form = new FormData();
+        for (var i = 0; i < fileList.length; i++) form.append("files", fileList[i]);
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/upload");
+        xhr.upload.onprogress = function (event) {
+          if (onProgress && event.lengthComputable) {
+            onProgress(Math.round((event.loaded / event.total) * 100));
+          }
+        };
+        xhr.onload = function () {
+          var payload = null;
+          try { payload = JSON.parse(xhr.responseText); } catch (err) { payload = null; }
+          if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
+          else reject(new Error((payload && (payload.detail || payload.message)) || ("上传失败 HTTP " + xhr.status)));
+        };
+        xhr.onerror = function () { reject(new Error("上传失败：网络错误")); };
+        xhr.send(form);
+      });
+    },
+    listUploads: function () { return request("/api/upload"); },
+    deleteUpload: function (filename) {
+      return request("/api/upload/" + encodeURIComponent(filename), { method: "DELETE" });
+    },
+
     getSettings: function () { return request("/api/settings"); },
     saveSettings: function (patch) { return request("/api/settings", { method: "PATCH", body: patch }); },
     testLlm: function () { return request("/api/settings/test-llm", { method: "POST" }); },
-    testBilibili: function () { return request("/api/settings/test-bilibili", { method: "POST" }); }
+    testBilibili: function () { return request("/api/settings/test-bilibili", { method: "POST" }); },
+    cacheStats: function () { return request("/api/cache"); },
+    clearCache: function () { return request("/api/cache", { method: "DELETE" }); }
   };
 })();

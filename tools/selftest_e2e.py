@@ -131,6 +131,23 @@ async def mock_transcriptions(request: Request):
     return {"text": MOCK_ASR_TEXT}
 
 
+def _fake_wav_bytes(seconds: float = 1.0, rate: int = 8000) -> bytes:
+    """生成一个最小的合法 WAV（用于测试本地上传链路，避免依赖巨大视频文件）。"""
+    import math
+    import struct
+
+    frames = int(rate * seconds)
+    samples = bytearray()
+    for index in range(frames):
+        value = int(12000 * math.sin(2 * math.pi * 440 * index / rate))
+        samples += struct.pack("<h", value)
+    data_size = len(samples)
+    header = b"RIFF" + struct.pack("<I", 36 + data_size) + b"WAVE"
+    header += b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+    header += b"data" + struct.pack("<I", data_size)
+    return header + bytes(samples)
+
+
 def _serve_mock(port: int) -> None:
     uvicorn.run(mock_app, host="127.0.0.1", port=port, log_level="error")
 
@@ -186,6 +203,8 @@ def main() -> int:
             "asr_base_url": f"http://127.0.0.1:{MOCK_PORT}/v1",
             "asr_api_key": "mock-key",
             "asr_model": "mock-whisper",
+            "cache_enabled": True,
+            "max_concurrency": 2,
         }
     )
 
@@ -278,37 +297,172 @@ def main() -> int:
             raw = client.get(f"/api/notes/{note_id}/raw")
             check("raw 接口返回纯文本", raw.status_code == 200 and raw.text.startswith("#"))
 
-            print("\n== 磁盘产物 ==")
-            from src.core.config import NOTES_DIR
+        print("\n== 转写缓存 ==")
+        stats = client.get("/api/cache").json()
+        print(f"  缓存条目 {stats.get('count')} 条，{stats.get('mb')} MB")
+        check("首次生成写入了缓存", stats.get("count", 0) >= 1, str(stats))
+        asr_before = int(REPORT.get("asr_called") or 0)
 
-            recent = sorted(
-                p.name for p in NOTES_DIR.glob("*") if p.stat().st_mtime > time.time() - 900
+        second = client.post("/api/tasks", json={"url": url})
+        check("第二次任务创建成功", second.status_code == 200, second.text[:160])
+        second_id = (second.json() or {}).get("id")
+        deadline = time.time() + 300
+        second_final: dict = {}
+        while time.time() < deadline:
+            second_final = client.get(f"/api/tasks/{second_id}").json()
+            if second_final.get("status") in ("success", "failed", "cancelled"):
+                break
+            time.sleep(1.0)
+        print(
+            f"  第二次：{second_final.get('status')} | 来源 {second_final.get('transcript_src')} | "
+            f"from_cache={second_final.get('from_cache')}"
+        )
+        check("第二次任务成功", second_final.get("status") == "success", str(second_final.get("error")))
+        check("第二次命中缓存", int(second_final.get("from_cache") or 0) == 1)
+        check(
+            "命中缓存后不再调用转写接口",
+            int(REPORT.get("asr_called") or 0) == asr_before,
+            f"{asr_before} -> {REPORT.get('asr_called')}",
+        )
+        second_note = second_final.get("note_id")
+        if second_note:
+            note_ids.append(second_note)
+
+        cleared = client.delete("/api/cache")
+        check("清空缓存接口可用", cleared.status_code == 200 and cleared.json().get("removed", 0) >= 1, cleared.text[:160])
+        check("清空后缓存为空", client.get("/api/cache").json().get("count") == 0)
+
+        print("\n== 批量提交 ==")
+        batch = client.post(
+            "/api/tasks/batch",
+            json={
+                "text": f"{url}\n{url}\nhttps://example.com/not-a-video",
+                "note_style": "concise",
+            },
+        )
+        check("批量接口返回 200", batch.status_code == 200, batch.text[:200])
+        batch_data = batch.json() if batch.status_code == 200 else {}
+        check("批次 id 存在", bool(batch_data.get("batch_id")))
+        check("去重后提交 1 条", batch_data.get("created") == 1, str(batch_data.get("created")))
+        check("非法链接被跳过", len(batch_data.get("skipped") or []) == 1, str(batch_data.get("skipped")))
+        if batch_data.get("batch_id"):
+            detail_batch = client.get(f"/api/tasks/batches/{batch_data['batch_id']}").json()
+            check("批次详情含任务", len(detail_batch.get("tasks") or []) == 1)
+            for task in detail_batch.get("tasks") or []:
+                deadline = time.time() + 300
+                while time.time() < deadline:
+                    current = client.get(f"/api/tasks/{task['id']}").json()
+                    if current.get("status") in ("success", "failed", "cancelled"):
+                        break
+                    time.sleep(1.0)
+                if current.get("note_id"):
+                    note_ids.append(current["note_id"])
+                check("批次任务完成", current.get("status") == "success", str(current.get("error")))
+
+        print("\n== 本地视频上传 ==")
+        wav = _fake_wav_bytes(1.0)
+        upload = client.post(
+            "/api/upload",
+            files={"files": ("测试音频.wav", wav, "audio/wav")},
+        )
+        check("上传接口返回 200", upload.status_code == 200, upload.text[:200])
+        uploaded = (upload.json().get("items") or [{}])[0] if upload.status_code == 200 else {}
+        print(f"  上传结果：{uploaded.get('filename')}（{uploaded.get('size_text')}）")
+        check("返回 local:// 链接", str(uploaded.get("url", "")).startswith("local://"), str(uploaded.get("url")))
+
+        listings = client.get("/api/upload").json().get("items") or []
+        check("上传列表可见", any(item["url"] == uploaded.get("url") for item in listings))
+
+        if uploaded.get("url"):
+            local_task = client.post("/api/tasks", json={"url": uploaded["url"]})
+            check("本地上传可作为任务提交", local_task.status_code == 200, local_task.text[:200])
+            local_id = (local_task.json() or {}).get("id")
+            deadline = time.time() + 300
+            local_final: dict = {}
+            while time.time() < deadline:
+                local_final = client.get(f"/api/tasks/{local_id}").json()
+                if local_final.get("status") in ("success", "failed", "cancelled"):
+                    break
+                time.sleep(1.0)
+            print(
+                f"  本地任务：{local_final.get('status')} | 平台 {local_final.get('platform')} | "
+                f"来源 {local_final.get('transcript_src')}"
             )
-            print(f"  最近产物：{recent}")
-            check("落盘了 md 文件", any(name.endswith(".md") for name in recent))
-            check("落盘了 mindmap.json", any(name.endswith(".mindmap.json") for name in recent))
-            check("落盘了 xmind", any(name.endswith(".xmind") for name in recent))
+            check("本地任务成功", local_final.get("status") == "success", str(local_final.get("error")))
+            check("识别为 local 平台", local_final.get("platform") == "local")
+            check("本地任务走了转写", str(local_final.get("transcript_src", "")).startswith("asr"))
+            if local_final.get("note_id"):
+                note_ids.append(local_final["note_id"])
+
+        print("\n== 重新生成（忽略缓存）==")
+        regen = client.post(f"/api/tasks/{task_id}/refresh")
+        check("重生成返回 200", regen.status_code == 200, regen.text[:160])
+        check("新任务的 refresh 标记为 1", int((regen.json() or {}).get("refresh") or 0) == 1)
+        asr_before_regen = int(REPORT.get("asr_called") or 0)
+        regen_id = (regen.json() or {}).get("id")
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            current = client.get(f"/api/tasks/{regen_id}").json()
+            if current.get("status") in ("success", "failed", "cancelled"):
+                break
+            time.sleep(1.0)
+        check("重生成任务成功", current.get("status") == "success", str(current.get("error")))
+        check("重生成忽略了缓存", int(current.get("from_cache") or 0) == 0)
+        check(
+            "重生成重新调用了转写",
+            int(REPORT.get("asr_called") or 0) > asr_before_regen,
+            f"{asr_before_regen} -> {REPORT.get('asr_called')}",
+        )
+        if current.get("note_id"):
+            note_ids.append(current["note_id"])
+
+        print("\n== 磁盘产物 ==")
+        from src.core.config import NOTES_DIR
+
+        recent = sorted(
+            p.name for p in NOTES_DIR.glob("*") if p.stat().st_mtime > time.time() - 900
+        )
+        print(f"  最近产物 {len(recent)} 个：{recent[:4]}…")
+        check("落盘了 md 文件", any(name.endswith(".md") for name in recent))
+        check("落盘了 mindmap.json", any(name.endswith(".mindmap.json") for name in recent))
+        check("落盘了 xmind", any(name.endswith(".xmind") for name in recent))
 
         print("\n== 假模型调用统计 ==")
         print(
             f"  调用 {REPORT.get('calls')} 次 | 笔记提示词 {REPORT.get('saw_note_prompt')} | "
-            f"导图提示词 {REPORT.get('saw_mindmap_prompt')}"
+            f"导图提示词 {REPORT.get('saw_mindmap_prompt')} | 转写 {REPORT.get('asr_called')} 次"
         )
         check("调用过笔记生成", bool(REPORT.get("saw_note_prompt")))
         check("调用过导图生成", bool(REPORT.get("saw_mindmap_prompt")))
+
+        print("\n== 队列状态 ==")
+        queue = client.get("/api/queue").json()
+        print(f"  {queue}")
+        check("队列接口返回上限", queue.get("limit", 0) >= 1, str(queue))
 
         print("\n== 错误处理 ==")
         bad = client.post("/api/tasks", json={"url": "https://example.com/not-bilibili"})
         check("非法链接被拒绝", bad.status_code == 400, str(bad.status_code))
         check("不存在的笔记返回 404", client.get("/api/notes/n_notexist").status_code == 404)
+        check(
+            "空批量提交被拒绝",
+            client.post("/api/tasks/batch", json={"text": "   "}).status_code == 400,
+        )
 
         print("\n== 清理测试数据 ==")
         for note_id in note_ids:
-            client.delete(f"/api/notes/{note_id}?purge=true")
+            if note_id:
+                client.delete(f"/api/notes/{note_id}?purge=true")
         if task_id:
             client.delete(f"/api/tasks/{task_id}")
+        # 清掉本批次与本次测试产生的任务/上传文件
+        remaining = client.get("/api/tasks?limit=200").json().get("items") or []
+        for task in remaining:
+            client.delete(f"/api/tasks/{task['id']}")
+        for item in client.get("/api/upload").json().get("items") or []:
+            client.delete(f"/api/upload/{item['filename']}")
         check("测试笔记已清理", all(
-            client.get(f"/api/notes/{nid}").status_code == 404 for nid in note_ids
+            client.get(f"/api/notes/{nid}").status_code == 404 for nid in note_ids if nid
         ))
 
     print("\n" + "=" * 52)
