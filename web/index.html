@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>视频蒸馏器 · B 站链接笔记生成</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🧪</span>
+      <div>
+        <h1>视频蒸馏器</h1>
+        <p class="sub">B 站链接 → Markdown 笔记 + 思维导图</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="health" class="pill pill-muted" title="服务与大模型状态">检测中…</span>
+      <button id="btn-settings" class="btn btn-ghost">⚙️ 设置</button>
+      <a class="btn btn-ghost" href="/docs" target="_blank" rel="noreferrer">📘 API</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左栏：提交 + 任务列表 -->
+    <section class="panel panel-left">
+      <div class="card">
+        <h2 class="card-title">新建笔记</h2>
+        <form id="form-create" class="form">
+          <textarea id="input-url" rows="2" placeholder="粘贴 B 站视频链接，例如 https://www.bilibili.com/video/BV1xx411c7mD?p=1&#10;也支持 av 号、b23.tv 短链"></textarea>
+          <div class="form-row">
+            <label class="field">
+              <span>笔记风格</span>
+              <select id="input-style">
+                <option value="">跟随全局设置</option>
+                <option value="concise">精简</option>
+                <option value="detailed">详尽</option>
+                <option value="academic">学术</option>
+              </select>
+            </label>
+            <button type="submit" id="btn-submit" class="btn btn-primary">生成笔记</button>
+          </div>
+          <p class="hint" id="create-hint">生成一个 30 分钟视频的笔记通常需要 1-3 分钟。</p>
+        </form>
+      </div>
+
+      <div class="card card-grow">
+        <div class="card-head">
+          <h2 class="card-title">任务记录</h2>
+          <div class="card-head-actions">
+            <span id="task-count" class="pill pill-muted">0</span>
+            <button id="btn-refresh" class="btn btn-mini">刷新</button>
+          </div>
+        </div>
+        <div id="task-list" class="task-list">
+          <p class="empty">还没有任务，先粘一条链接试试。</p>
+        </div>
+      </div>
+
+      <div class="card card-grow">
+        <div class="card-head">
+          <h2 class="card-title">笔记库</h2>
+          <span id="note-count" class="pill pill-muted">0</span>
+        </div>
+        <div id="note-list" class="note-list">
+          <p class="empty">生成的笔记会出现在这里。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右栏：结果 -->
+    <section class="panel panel-right">
+      <div class="result-head">
+        <div class="result-title">
+          <h2 id="result-title">等待生成…</h2>
+          <p id="result-meta" class="result-meta">提交链接后，这里会显示 Markdown 笔记与思维导图。</p>
+        </div>
+        <div class="result-actions" id="result-actions" hidden>
+          <div class="tabs" id="tabs">
+            <button class="tab is-active" data-tab="mindmap">思维导图</button>
+            <button class="tab" data-tab="markdown">Markdown</button>
+          </div>
+          <div class="btn-group">
+            <button id="btn-export-png" class="btn btn-mini" title="导出当前导图为 PNG 图片">🖼 导出图片</button>
+            <button id="btn-export-svg" class="btn btn-mini" title="导出矢量 SVG">SVG</button>
+            <button id="btn-export-xmind" class="btn btn-mini" title="导出可编辑的 XMind 文件">🧠 XMind</button>
+            <button id="btn-download-md" class="btn btn-primary btn-mini">⬇️ 下载 MD</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="progress-wrap" class="progress-wrap" hidden>
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+        <div class="progress-text"><span id="progress-stage">准备中</span><span id="progress-percent">0%</span></div>
+        <p id="progress-message" class="progress-message"></p>
+      </div>
+
+      <div id="view-mindmap" class="view view-mindmap">
+        <div class="mindmap-toolbar">
+          <button class="btn btn-mini" id="mm-fit" title="适应画布">适应</button>
+          <button class="btn btn-mini" id="mm-zoom-in">＋</button>
+          <button class="btn btn-mini" id="mm-zoom-out">－</button>
+          <span class="hint-inline">滚轮缩放 · 拖拽平移 · 点击节点折叠</span>
+        </div>
+        <svg id="mindmap"></svg>
+        <div id="mindmap-empty" class="empty-overlay">还没有导图数据</div>
+      </div>
+
+      <div id="view-markdown" class="view view-markdown" hidden>
+        <article id="markdown-body" class="markdown-body"></article>
+      </div>
+    </section>
+  </main>
+
+  <!-- 设置弹窗 -->
+  <dialog id="dialog-settings" class="dialog">
+    <form method="dialog" class="dialog-body" id="form-settings">
+      <h2>设置</h2>
+      <p class="hint">配置保存在 <code>data/settings.json</code>，也可用项目根目录的 <code>.env</code>。留空表示不修改。</p>
+
+      <fieldset>
+        <legend>大模型（OpenAI 兼容）</legend>
+        <label class="field"><span>接口地址 base_url</span>
+          <input id="s-llm_base_url" placeholder="https://api.deepseek.com/v1" />
+        </label>
+        <label class="field"><span>API Key</span>
+          <input id="s-llm_api_key" type="password" placeholder="sk-..." autocomplete="off" />
+        </label>
+        <div class="grid-2">
+          <label class="field"><span>主模型</span>
+            <input id="s-llm_model" placeholder="deepseek-chat" />
+          </label>
+          <label class="field"><span>导图模型（可留空）</span>
+            <input id="s-llm_mindmap_model" placeholder="复用主模型" />
+          </label>
+        </div>
+        <div class="grid-2">
+          <label class="field"><span>温度 temperature</span>
+            <input id="s-llm_temperature" type="number" step="0.1" min="0" max="2" />
+          </label>
+          <label class="field"><span>超时（秒）</span>
+            <input id="s-llm_timeout" type="number" min="30" max="1800" />
+          </label>
+        </div>
+        <button type="button" id="btn-test-llm" class="btn btn-mini">测试大模型连接</button>
+        <span id="test-llm-result" class="hint-inline"></span>
+      </fieldset>
+
+      <fieldset>
+        <legend>B 站访问</legend>
+        <label class="field"><span>Cookie（遇到 412 风控或需要 AI 字幕时填写）</span>
+          <textarea id="s-bili_cookie" rows="2" placeholder="SESSDATA=...; bili_jct=...; buvid3=..."></textarea>
+        </label>
+        <div class="grid-2">
+          <label class="field"><span>请求间隔（秒）</span>
+            <input id="s-bili_request_interval" type="number" step="0.1" min="0" max="10" />
+          </label>
+          <div class="field field-btn">
+            <span>&nbsp;</span>
+            <button type="button" id="btn-test-bili" class="btn btn-mini">测试 B 站连通性</button>
+          </div>
+        </div>
+        <span id="test-bili-result" class="hint-inline"></span>
+      </fieldset>
+
+      <fieldset>
+        <legend>语音转写（视频无字幕时）</legend>
+        <div class="grid-2">
+          <label class="field"><span>后端</span>
+            <select id="s-asr_provider">
+              <option value="none">关闭</option>
+              <option value="openai">OpenAI 兼容接口</option>
+              <option value="faster-whisper">本地 faster-whisper</option>
+            </select>
+          </label>
+          <label class="field"><span>模型</span>
+            <input id="s-asr_model" placeholder="whisper-1" />
+          </label>
+        </div>
+        <div class="grid-2">
+          <label class="field"><span>转写接口（留空复用大模型地址）</span>
+            <input id="s-asr_base_url" placeholder="https://api.openai.com/v1" />
+          </label>
+          <label class="field"><span>转写 API Key</span>
+            <input id="s-asr_api_key" type="password" autocomplete="off" />
+          </label>
+        </div>
+        <div class="grid-2">
+          <label class="field"><span>本地模型规格</span>
+            <select id="s-asr_local_model">
+              <option value="tiny">tiny（最快）</option>
+              <option value="base">base</option>
+              <option value="small">small（推荐）</option>
+              <option value="medium">medium</option>
+              <option value="large-v3">large-v3（最准）</option>
+            </select>
+          </label>
+          <label class="field"><span>本地设备</span>
+            <select id="s-asr_local_device">
+              <option value="auto">auto</option>
+              <option value="cuda">cuda</option>
+              <option value="cpu">cpu</option>
+            </select>
+          </label>
+        </div>
+      </fieldset>
+
+      <label class="field"><span>默认笔记风格</span>
+        <select id="s-note_style">
+          <option value="concise">精简</option>
+          <option value="detailed">详尽</option>
+          <option value="academic">学术</option>
+        </select>
+      </label>
+
+      <menu class="dialog-actions">
+        <button value="cancel" class="btn btn-ghost">取消</button>
+        <button value="save" id="btn-save-settings" class="btn btn-primary">保存</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <!-- 本地依赖（离线可用）；若缺失则自动回退 CDN -->
+  <script src="/static/js/fallback.js"></script>
+  <script src="/static/vendor/d3/d3.min.js"></script>
+  <script src="/static/vendor/markmap-view/browser/index.js"></script>
+  <script src="/static/vendor/markmap-lib/browser/index.iife.js"></script>
+  <script src="/static/vendor/marked/marked.min.js"></script>
+  <script src="/static/js/markdown.js"></script>
+  <script src="/static/js/mindmap.js"></script>
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

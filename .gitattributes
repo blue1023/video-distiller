@@ -1,0 +1,11 @@
+# 统一按 LF 存储，避免 Windows/macOS 协作时整文件 diff
+* text=auto eol=lf
+
+# 二进制产物不要做换行转换
+*.xmind binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.db binary

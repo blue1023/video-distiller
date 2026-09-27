@@ -1,0 +1,115 @@
+{
+  "content": "从零实现 RAG 系统：架构、向量库与召回重排",
+  "children": [
+    {
+      "content": "作者用 3 小时从零搭了一套可用的 RAG 系统，重点是分块策略、混合召回与重排",
+      "children": []
+    },
+    {
+      "content": "为什么朴素 RAG 不好用",
+      "children": [
+        {
+          "content": "朴素 RAG 的三个失效场景：多跳问题、术语指代、需要跨文档汇总",
+          "children": []
+        },
+        {
+          "content": "把 embedding 当成理解是最大的误解，它只是把语义压到一个点上",
+          "children": []
+        },
+        {
+          "content": "实测：同一份文档换一种分块方式，召回命中率能差 20 个百分点以上",
+          "children": []
+        }
+      ]
+    },
+    {
+      "content": "数据准备与分块策略",
+      "children": [
+        {
+          "content": "先用 pdfplumber 抽文本，再按标题层级建立章节路径元数据，例如 第三章 > 3.2 >…",
+          "children": []
+        },
+        {
+          "content": "递归分块：优先在段落边界切，其次句子，最后才硬切；块大小 512 token、重叠 64 tok…",
+          "children": []
+        },
+        {
+          "content": "重叠不是为了记住上下文，而是为了保证跨块的句子不被截断",
+          "children": []
+        },
+        {
+          "content": "中文场景用字符数估算会偏大，建议用 tokenizer 实测",
+          "children": []
+        },
+        {
+          "content": "每个块都要带上来源文件、章节路径、页码、时间戳，后续过滤与引用全靠它",
+          "children": []
+        }
+      ]
+    },
+    {
+      "content": "混合召回：BM25 加向量",
+      "children": [
+        {
+          "content": "只做向量召回时，专有名词与编号（如 3.2.1、RFC 7231）几乎必然漏检",
+          "children": []
+        },
+        {
+          "content": "BM25 负责字面命中，向量负责语义泛化，两路各取 top 50 再融合",
+          "children": []
+        },
+        {
+          "content": "融合用 RRF（倒数排名融合），不需要调权重，实践中最省事",
+          "children": []
+        },
+        {
+          "content": "元数据过滤要前置：先按章节或时间缩小范围再排序，提升比换模型更明显",
+          "children": []
+        }
+      ]
+    },
+    {
+      "content": "重排与生成",
+      "children": [
+        {
+          "content": "cross-encoder 重排把 top 50 压到 top 5，延迟增加约 200ms 但准…",
+          "children": []
+        },
+        {
+          "content": "重排模型选百兆级的小模型就够，用大模型重排性价比很低",
+          "children": []
+        },
+        {
+          "content": "Prompt 里要求只依据给定片段回答并标注来源编号，可大幅降低幻觉",
+          "children": []
+        }
+      ]
+    },
+    {
+      "content": "评估方法与常见坑",
+      "children": [
+        {
+          "content": "先建 50 条人工标注的问答集，比追求自动化指标更实际",
+          "children": []
+        },
+        {
+          "content": "分开评估召回是否命中与生成是否正确，否则无法定位问题",
+          "children": []
+        },
+        {
+          "content": "三个坑：分块过大导致召回噪声、只做向量召回、忽略元数据过滤",
+          "children": []
+        }
+      ]
+    },
+    {
+      "content": "核心结论",
+      "children": [
+        {
+          "content": "分块策略对效果的影响大于换 embedding 模型",
+          "children": []
+        }
+      ]
+    }
+  ]
+}
