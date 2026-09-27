@@ -135,22 +135,44 @@ def main() -> int:
     else:
         print(f"远端 {branch} 不存在（HTTP {status}）")
 
-    pending = (
-        git("rev-list", "--reverse", f"{remote_sha}..{head}").splitlines() if remote_sha else [head]
-    )
-    print(f"待推送提交 {len(pending)} 个：{[c[:8] for c in pending]}")
-
-    # 远端已有对象（按 sha 索引），并记录路径 -> sha 便于判断 blob 是否已存在
+    # 远端已有对象（按 sha 索引）与远端根 tree（用于内容比对）
+    # 注意：API 创建的远端 commit 本地不一定存在，不能对 remote_sha 用 git rev-parse，
+    # 所以内容比对要靠 GitHub 返回的根 tree sha。
     remote_objects: set[str] = set()
+    remote_tree_sha: str | None = None
     if remote_sha:
         status, resp = github(
             f"/repos/{owner}/{repo_name}/git/trees/{remote_sha}?recursive=1", token
         )
         if status == 200:
+            remote_tree_sha = resp.get("sha")
             for item in resp.get("tree", []):
                 remote_objects.add(item["sha"])
         remote_objects.add(remote_sha)
     print(f"远端已知对象：{len(remote_objects)}")
+
+    pending: list[str]
+    if not remote_sha:
+        pending = [head]
+    else:
+        try:
+            pending = git("rev-list", "--reverse", f"{remote_sha}..{head}").splitlines()
+        except RuntimeError:
+            # 本地与远端历史不同源（例如之前用 API 推送过、父提交被重写）
+            local_tree = git("rev-parse", f"{head}^{{tree}}")
+            if remote_tree_sha and local_tree == remote_tree_sha:
+                print("本地与远端内容一致（历史不同源但树相同），无需推送")
+                if os.environ.get("SYNC_LOCAL_REF", "1") == "1":
+                    subprocess.run(
+                        ["git", "update-ref", f"refs/heads/{branch}", remote_sha],
+                        cwd=BASE_DIR,
+                        capture_output=True,
+                    )
+                    print(f"   本地 {branch} 已同步到远端 commit {remote_sha[:8]}")
+                return 0
+            print("本地与远端历史不同源，改为把当前 HEAD 作为单个提交接在远端之后")
+            pending = [head]
+    print(f"待推送提交 {len(pending)} 个：{[c[:8] for c in pending]}")
 
     stats = {"blob": 0, "tree": 0, "commit": 0, "reused": 0}
     commit_map: dict[str, str] = {}
@@ -215,9 +237,17 @@ def main() -> int:
     for commit_sha in pending:
         tree_sha, parents, message = parse_commit(git_bytes(commit_sha))
         new_tree = create_tree(tree_sha, "")
-        new_parents = [commit_map.get(p, p) for p in parents]
+        # 父提交映射：已推送过的用新 sha；远端不存在的本地父提交（分叉场景）
+        # 以及首个提交，统一接到远端当前 HEAD，保证远端提交链连续。
+        new_parents: list[str] = []
+        for parent in parents:
+            if parent in commit_map:
+                new_parents.append(commit_map[parent])
+            elif remote_sha:
+                new_parents.append(remote_sha)
+            else:
+                new_parents.append(parent)
         if not new_parents and remote_sha:
-            # 首个本地提交在远端没有父节点时，接到远端现有 HEAD 上，保证历史连续
             new_parents = [remote_sha]
         status, body = github(
             f"/repos/{owner}/{repo_name}/git/commits",
