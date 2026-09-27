@@ -49,12 +49,18 @@ def main() -> int:
     print(f"  远端文件数：{len(remote_files)}")
 
     # 本地 git 跟踪的文件（排除 gitignore 的）
+    # 注意：git 在 Windows 上默认把非 ASCII 文件名转义成八进制（core.quotepath），
+    # 不关掉的话中文文件名会被误判成"仅在本地"。
     import subprocess
 
     result = subprocess.run(
-        ["git", "ls-files"], cwd=BASE_DIR, capture_output=True, text=True, encoding="utf-8"
+        ["git", "-c", "core.quotepath=false", "ls-files"],
+        cwd=BASE_DIR,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
-    local_files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    local_files = [line.strip().strip('"') for line in result.stdout.splitlines() if line.strip()]
 
     missing = [f for f in local_files if f not in remote_files]
     extra = [f for f in remote_files if f not in local_files]
