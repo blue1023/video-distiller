@@ -11,13 +11,16 @@ python tools/selftest_offline.py
 # 2. 前端一致性检查（DOM id、资源引用、设置字段）
 python tools/check_frontend.py
 
-# 3. 联网自检（验证 B 站接口 / 字幕 / 音频下载是否可用）
+# 3. 文档检查（内部链接、提到的文件是否存在）
+python tools/check_docs.py
+
+# 4. 联网自检（验证 B 站接口 / 字幕 / 音频下载是否可用）
 python tools/selftest_network.py
 
-# 4. 端到端自检（会起一个"假的大模型服务"，不需要真实 API Key）
+# 5. 端到端自检（会起一个"假的大模型服务"，不需要真实 API Key）
 python tools/selftest_e2e.py
 
-# 5. 真实 HTTP 冒烟（需要先 python run.py 起服务）
+# 6. 真实 HTTP 冒烟（需要先 python run.py 起服务）
 python tools/smoke_http.py
 ```
 
@@ -37,6 +40,8 @@ python tools/smoke_http.py
 | `probe_bili_subtitle.py` | 深入对比 `player/v2` 与 `player/wbi/v2` 的字幕返回 | 网络 |
 | `probe_video_page.py` | 检查视频页 HTML 里是否内嵌字幕信息 | 网络 |
 | `list_routes.py` | 打印应用注册的所有路由（排查路由冲突） | 无 |
+| `dump_structure.py` | 导出各源文件的类/函数清单（读代码前先摸清结构） | 无 |
+| `verify_doc_examples.py` | 验证 `docs/` 里的代码示例真能跑（含 05 章的 demo 平台示例） | 全部依赖 |
 | `gh_push.py` | 校验 GitHub Token、创建仓库、推送代码（token 走 `GH_TOKEN`） | 网络 |
 | `gh_push_api.py` | 上面失败时的兜底：直接调 GitHub REST API 推对象（本机 git TLS 不可用时用） | 网络 |
 | `gh_check.py` | 对比本地已提交文件与远端仓库是否一致 | 网络 |

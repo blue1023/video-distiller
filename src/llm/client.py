@@ -133,8 +133,17 @@ async def chat(
         raise LLMError("未配置模型名（llm_model）")
 
     headers = {"Content-Type": "application/json"}
-    if settings.llm_api_key.strip():
-        headers["Authorization"] = f"Bearer {settings.llm_api_key.strip()}"
+    api_key = settings.llm_api_key.strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    else:
+        # 没配 Key 就直接失败，别白跑一次网络请求（本地 Ollama 之类除外）
+        local = any(host in settings.llm_base_url for host in ("127.0.0.1", "localhost", "0.0.0.0"))
+        if not local:
+            raise LLMError(
+                "尚未配置大模型 API Key。请点右上角「设置」填写接口地址与 API Key，"
+                "或在项目根目录的 .env 里配置 LLM_API_KEY。"
+            )
 
     payload: Dict[str, Any] = {
         "model": target_model,

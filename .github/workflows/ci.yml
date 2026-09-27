@@ -31,5 +31,11 @@ jobs:
       - name: 离线自检（不需要网络与 API Key）
         run: python tools/selftest_offline.py
 
+      - name: 前端一致性检查
+        run: python tools/check_frontend.py
+
+      - name: 文档链接与引用检查
+        run: python tools/check_docs.py
+
       - name: 应用可正常导入
         run: python -c "import src.app; print('routes:', len(src.app.app.routes))"
